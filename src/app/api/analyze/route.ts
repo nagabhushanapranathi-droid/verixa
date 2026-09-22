@@ -1,15 +1,39 @@
 import { NextResponse } from "next/server";
 import { analyzeOfferContent } from "@/lib/ai";
 import { calculateScamThreatIndex } from "@/lib/scoring";
+import { sanitizeTextInput, sanitizeBase64Image } from "@/lib/sanitization";
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { text, imageBase64 } = body;
 
-    if (!text && !imageBase64) {
+    let sanitizedText: string | undefined;
+    let sanitizedImage: string | undefined;
+
+    if (text !== undefined && text !== null) {
+      const textResult = sanitizeTextInput(text);
+      if (!textResult.isValid && !imageBase64) {
+        return NextResponse.json({ error: textResult.error }, { status: 400 });
+      }
+      if (textResult.isValid) {
+        sanitizedText = textResult.sanitized;
+      }
+    }
+
+    if (imageBase64 !== undefined && imageBase64 !== null) {
+      const imageResult = sanitizeBase64Image(imageBase64);
+      if (!imageResult.isValid && !sanitizedText) {
+        return NextResponse.json({ error: imageResult.error }, { status: 400 });
+      }
+      if (imageResult.isValid) {
+        sanitizedImage = imageResult.sanitized;
+      }
+    }
+
+    if (!sanitizedText && !sanitizedImage) {
       return NextResponse.json(
-        { error: "Text or image is required for analysis." },
+        { error: "Valid correspondence text or document image is required for analysis." },
         { status: 400 }
       );
     }
@@ -22,7 +46,7 @@ export async function POST(req: Request) {
         const fastApiResponse = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(imageBase64 ? { imageBase64, text } : { text }),
+          body: JSON.stringify(sanitizedImage ? { imageBase64: sanitizedImage, text: sanitizedText } : { text: sanitizedText }),
         });
         if (fastApiResponse.ok) {
           const fastApiData = await fastApiResponse.json();
@@ -35,8 +59,8 @@ export async function POST(req: Request) {
 
     // Direct FreeLLMAPI processing
     const verificationResult = await analyzeOfferContent(
-      text || "Analyze this image for scam or phishing patterns.",
-      imageBase64
+      sanitizedText || "Analyze this image for scam or phishing patterns.",
+      sanitizedImage
     );
     const finalReport = calculateScamThreatIndex(verificationResult);
 

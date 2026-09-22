@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { cleanAndParseJson, extractEntitiesFromText } from "./json-parser";
+import { VerificationResult } from "@/types/analysis";
 
 const openai = new OpenAI({
   apiKey: process.env.FREELLM_API_KEY || "not_needed",
@@ -82,60 +84,13 @@ Return ONLY valid JSON matching this exact schema, with no markdown formatting w
     temperature: 0.2,
   });
 
-  const rawText = (response.choices[0]?.message?.content || "{}")
-    .replace(/```json/g, "")
-    .replace(/```/g, "")
-    .trim();
+  const rawText = response.choices[0]?.message?.content || "{}";
+  const parsed = cleanAndParseJson<VerificationResult>(rawText);
 
-  try {
-    const parsed = JSON.parse(rawText);
-
-    // Fallback extraction if model omitted or left companyName empty
-    if (!parsed.extractedEntities) {
-      parsed.extractedEntities = {};
-    }
-
-    // Heuristic entity & link recovery if model missed them
-    if (text) {
-      // Find URLs if missing
-      if (!parsed.extractedEntities.urls || parsed.extractedEntities.urls.length === 0) {
-        const urlMatches = text.match(/https?:\/\/[^\s"'<>]+/gi);
-        if (urlMatches) {
-          parsed.extractedEntities.urls = Array.from(new Set(urlMatches));
-        }
-      }
-
-      // Find emails or phone numbers if missing
-      if (!parsed.extractedEntities.contactInfo) {
-        const emailMatches = text.match(/[\w.-]+@[\w.-]+\.\w+/gi);
-        const phoneMatches = text.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g);
-        const contacts = [
-          ...(emailMatches || []),
-          ...(phoneMatches || []),
-        ];
-        if (contacts.length > 0) {
-          parsed.extractedEntities.contactInfo = contacts.join(", ");
-        }
-      }
-
-      // If company name was not identified or is generic, extract from common patterns
-      if (
-        !parsed.extractedEntities.companyName ||
-        parsed.extractedEntities.companyName.toLowerCase().includes("unspecified") ||
-        parsed.extractedEntities.companyName.toLowerCase().includes("none")
-      ) {
-        const companyMatch =
-          text.match(/(?:at|from|with|joining|team at|careers at|HR at)\s+([A-Z][A-Za-z0-9&.\s]{2,25})/i) ||
-          text.match(/(?:Company|Organization|Firm|Employer):\s*([A-Za-z0-9&.\s]{2,30})/i);
-        if (companyMatch && companyMatch[1]) {
-          parsed.extractedEntities.companyName = companyMatch[1].trim();
-        }
-      }
-    }
-
-    return parsed;
-  } catch (err) {
-    console.error("Failed to parse JSON response from model:", rawText);
-    throw new Error("AI returned malformed analysis data. Please try again.");
+  // Pure heuristic recovery for any missing entities
+  if (text) {
+    parsed.extractedEntities = extractEntitiesFromText(text, parsed.extractedEntities);
   }
+
+  return parsed;
 }

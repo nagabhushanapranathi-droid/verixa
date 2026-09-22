@@ -1,24 +1,21 @@
 import { NextResponse } from "next/server";
 import { generateContent } from "@/lib/ai";
 import { calculateScamThreatIndex } from "@/lib/scoring";
+import { parseAndValidateUrl, evaluateUrlRiskPatterns } from "@/lib/url-analyzer";
+import { cleanAndParseJson } from "@/lib/json-parser";
+import { VerificationResult } from "@/types/analysis";
 
 export async function POST(req: Request) {
   try {
     const { url } = await req.json();
 
-    if (!url || typeof url !== "string") {
-      return NextResponse.json({ error: "A valid URL is required." }, { status: 400 });
+    const validation = parseAndValidateUrl(url);
+    if (!validation.isValid) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
     }
 
-    // Basic SSRF check to prevent scanning local network loops
-    if (
-      url.includes("localhost") ||
-      url.includes("127.0.0.1") ||
-      url.startsWith("http://192.168.") ||
-      url.startsWith("http://10.")
-    ) {
-      return NextResponse.json({ error: "Restricted network URL." }, { status: 400 });
-    }
+    const normalizedUrl = validation.normalizedUrl;
+    const localRisk = evaluateUrlRiskPatterns(normalizedUrl);
 
     const prompt = `You are a cybersecurity URL and phishing analyst. Analyze this URL for typosquatting, phishing patterns, fake career portal indicators, or malicious structure: "${url}".
 
@@ -48,9 +45,19 @@ Return ONLY valid JSON matching this exact schema, with no markdown formatting w
 }`;
 
     const rawResponse = await generateContent(prompt);
-    const cleanedText = rawResponse.replace(/```json/g, "").replace(/```/g, "").trim();
-    
-    const verificationResult = JSON.parse(cleanedText);
+    const verificationResult = cleanAndParseJson<VerificationResult>(rawResponse);
+
+    // Merge any locally flagged critical heuristic signals (e.g. typosquatting or IP host)
+    if (localRisk.signals.length > 0) {
+      verificationResult.riskSignals = [
+        ...localRisk.signals,
+        ...(verificationResult.riskSignals || []),
+      ];
+      if (localRisk.isSuspicious) {
+        verificationResult.impersonationIndicators = true;
+      }
+    }
+
     const finalReport = calculateScamThreatIndex(verificationResult);
 
     return NextResponse.json(finalReport);
